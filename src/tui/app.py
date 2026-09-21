@@ -79,17 +79,22 @@ class CoachApp:
             try:
                 if title:
                     self.console.rule(f"[bold {border_style}]{title}[/bold {border_style}]")
+                cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                glow_width = max(40, cols - 2)
                 res = subprocess.run(
-                    [self.glow_path, "-s", "dark", "-"],
+                    [self.glow_path, "-s", "dark", "-w", str(glow_width), "-"],
                     input=text,
                     text=True,
                     capture_output=True
                 )
                 if res.returncode == 0 and res.stdout.strip():
-                    self.console.print(res.stdout.rstrip())
+                    sys.stdout.write(res.stdout)
+                    if not res.stdout.endswith("\n"):
+                        sys.stdout.write("\n")
+                    sys.stdout.flush()
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Glow 渲染失败，降级为 Rich Panel: {}", e)
 
         # Fallback 到 Rich Panel 渲染
         self.console.print(Panel(
