@@ -73,16 +73,23 @@ class CoachApp:
             pass
 
     def render_markdown_content(self, text: str, title: str = "", border_style: str = "magenta"):
-        """统一渲染 Markdown 内容：优先使用 glow 呈现极致终端排版。"""
-        if self.glow_path:
-            # 使用 glow 渲染
+        """统一渲染 Markdown 内容：跨终端自适应排版（支持深色/浅色终端自适应与降级）。"""
+        is_dumb = os.environ.get("TERM") == "dumb"
+        no_color = bool(os.environ.get("NO_COLOR"))
+
+        if self.glow_path and not is_dumb:
             try:
                 if title:
                     self.console.rule(f"[bold {border_style}]{title}[/bold {border_style}]")
                 cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-                glow_width = max(40, cols - 2)
+                # 动态自适应不同终端窗格（如 tmux 垂直切分屏、手机 SSH 小窗口等）
+                glow_width = max(20, cols) if cols < 40 else max(30, cols - 2)
+                
+                # 支持环境变量指定样式，默认 auto 自适应深色/浅色终端背景
+                style_mode = "plain" if no_color else os.environ.get("GLOW_STYLE", "auto")
+
                 res = subprocess.run(
-                    [self.glow_path, "-s", "dark", "-w", str(glow_width), "-"],
+                    [self.glow_path, "-s", style_mode, "-w", str(glow_width), "-"],
                     input=text,
                     text=True,
                     capture_output=True
@@ -96,7 +103,7 @@ class CoachApp:
             except Exception as e:
                 logger.warning("Glow 渲染失败，降级为 Rich Panel: {}", e)
 
-        # Fallback 到 Rich Panel 渲染
+        # Fallback 到 Rich Panel 渲染（天然支持 dumb/no_color/无glow环境）
         self.console.print(Panel(
             Markdown(text),
             title=f"[bold {border_style}]{title}[/bold {border_style}]",
@@ -309,7 +316,8 @@ class CoachApp:
                 self.console.print("[yellow]系统未检测到 glow，无法调用全屏分页。[/yellow]")
                 return True
             self.sync_file.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run([self.glow_path, "-p", "-s", "dark", str(self.sync_file)])
+            style_mode = os.environ.get("GLOW_STYLE", "auto")
+            subprocess.run([self.glow_path, "-p", "-s", style_mode, str(self.sync_file)])
 
         elif op == "/hint":
             if not self.current_problem:

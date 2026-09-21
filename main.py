@@ -6,6 +6,14 @@ from pathlib import Path
 # 将项目根目录加入 sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 确保在任意终端（如 Windows Terminal、SSH、tmux、Linux Console）下标准流均为 UTF-8，彻底杜绝 Unicode 编码崩溃
+for _stream in (sys.stdout, sys.stderr, sys.stdin):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 from src.config import load_config
 from src.cf_client import CFClient
 from src.storage import Storage
