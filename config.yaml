@@ -1,0 +1,16 @@
+codeforces:
+  handle: "sanzenin"
+  rating_min: 1500
+  rating_max: 2000
+  tags: []
+
+llm:
+  provider: "openai_compatible"
+  base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"
+  api_key: "YOUR_API_KEY_HERE"
+  model: "glm-5-3-flash"
+  temperature: 0.2
+  max_tokens: 4096
+
+storage:
+  db_path: "data/cf_coach.db"

@@ -1,0 +1,1 @@
+"""Codeforces Coach CLI package."""
