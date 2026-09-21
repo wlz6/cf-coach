@@ -3,6 +3,7 @@ import random
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -21,6 +22,7 @@ from src.cf_client import CFClient, CFProblem
 from src.config import AppConfig, get_default_data_dir
 from src.logger import logger
 from src.storage import Storage
+from src.tex_renderer import convert_tex_in_markdown
 
 
 COMMANDS = [
@@ -49,7 +51,10 @@ class CoachApp:
         self.current_problem: Optional[CFProblem] = None
         self.current_summary: str = ""
         self.glow_path = shutil.which("glow")
-        self.sync_file = get_default_data_dir() / "current.md"
+        # 实时同步文件：优先在当前打开的工作区目录下生成 PROBLEM.md，并全局备份
+        self.workspace_sync_file = Path.cwd() / "PROBLEM.md"
+        self.global_sync_file = get_default_data_dir() / "current.md"
+        self.sync_file = self.workspace_sync_file
 
         # 配置 prompt_toolkit 补全与样式
         self.completer = WordCompleter(COMMANDS, ignore_case=True, match_middle=True)
@@ -58,22 +63,57 @@ class CoachApp:
         })
         self.session = PromptSession(completer=self.completer, style=self.pt_style)
 
-    def sync_markdown_file(self, section_name: str, markdown_content: str):
-        """将当前题目与交互内容实时同步到 ~/.local/share/cf-coach/current.md。"""
+    def init_markdown_session(self):
+        """在当前打开的工作区目录下生成/重置 PROBLEM.md，并记录题目元信息与数学模型。"""
         try:
             p = self.current_problem
-            header = ""
-            if p:
-                header = f"# CF{p.contest_id}{p.index} - {p.name}\n"
-                header += f"> Rating: {p.rating or 'Unrated'} | 时限: {p.time_limit} | 空间: {p.memory_limit} | 链接: {p.url}\n\n"
-            full_doc = f"{header}## 【{section_name}】\n\n{markdown_content}\n"
-            self.sync_file.parent.mkdir(parents=True, exist_ok=True)
-            self.sync_file.write_text(full_doc, encoding="utf-8")
-        except Exception:
-            pass
+            if not p:
+                return
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            tags_str = ", ".join(p.tags) if p.tags else "未指定"
+            doc = f"# Codeforces CF{p.contest_id}{p.index} - {p.name}\n\n"
+            doc += f"> **Rating**: `{p.rating or 'Unrated'}` | **时限**: `{p.time_limit}` | **空间**: `{p.memory_limit}`  \n"
+            doc += f"> **原题链接**: [{p.url}]({p.url})  \n"
+            doc += f"> **算法标签**: `{tags_str}`  \n"
+            doc += f"> **开始时间**: {now_str}\n\n"
+            doc += "---\n\n"
+            doc += "## ★ 纯粹算法数学模型 (已剥离故事背景)\n\n"
+            doc += f"{self.current_summary}\n\n"
+            doc += "---\n\n"
+            doc += "## 💬 交互训练记录 (实时会话)\n\n"
+
+            # 写入当前打开目录的 PROBLEM.md
+            self.workspace_sync_file.write_text(doc, encoding="utf-8")
+            # 写入全局备份 current.md
+            self.global_sync_file.parent.mkdir(parents=True, exist_ok=True)
+            self.global_sync_file.write_text(doc, encoding="utf-8")
+        except Exception as e:
+            logger.error("初始化工作区 Markdown 文件失败: {}", e)
+
+    def append_markdown_message(self, title: str, content: str):
+        """每次交互消息发生时，实时追加同步到当前工作区目录下的 PROBLEM.md。"""
+        try:
+            now_str = datetime.now().strftime("%H:%M:%S")
+            entry = f"\n### {title} ({now_str})\n\n{content}\n\n---\n"
+
+            # 追加到当前工作区目录
+            with open(self.workspace_sync_file, "a", encoding="utf-8") as f:
+                f.write(entry)
+            # 追加到全局备份
+            with open(self.global_sync_file, "a", encoding="utf-8") as f:
+                f.write(entry)
+        except Exception as e:
+            logger.error("追加工作区 Markdown 交互消息失败: {}", e)
+
+    def sync_markdown_file(self, section_name: str, markdown_content: str):
+        """兼容旧接口，自动转为追加或初始化。"""
+        self.append_markdown_message(f"【{section_name}】", markdown_content)
 
     def render_markdown_content(self, text: str, title: str = "", border_style: str = "magenta"):
-        """统一渲染 Markdown 内容：跨终端自适应排版（支持深色/浅色终端自适应与降级）。"""
+        """统一渲染 Markdown 内容：跨终端自适应排版 + Unicode TeX 增强。"""
+        # 预先将 LaTeX 公式转换为 Unicode 字符，避免终端输出生硬代码
+        display_text = convert_tex_in_markdown(text)
+
         is_dumb = os.environ.get("TERM") == "dumb"
         no_color = bool(os.environ.get("NO_COLOR"))
 
@@ -90,7 +130,7 @@ class CoachApp:
 
                 res = subprocess.run(
                     [self.glow_path, "-s", style_mode, "-w", str(glow_width), "-"],
-                    input=text,
+                    input=display_text,
                     text=True,
                     capture_output=True
                 )
@@ -105,7 +145,7 @@ class CoachApp:
 
         # Fallback 到 Rich Panel 渲染（天然支持 dumb/no_color/无glow环境）
         self.console.print(Panel(
-            Markdown(text),
+            Markdown(display_text),
             title=f"[bold {border_style}]{title}[/bold {border_style}]",
             border_style=border_style,
             expand=True
@@ -132,18 +172,15 @@ class CoachApp:
         table.add_row("LLM Provider", llm.provider)
         table.add_row("LLM Model", llm.model)
         table.add_row("Glow 渲染器", f"[bold green]✔ 已启用 ({self.glow_path})[/bold green]" if self.glow_path else "[yellow]未安装 (使用 Rich)[/yellow]")
-        table.add_row("实时同步文件", f"[dim]{self.sync_file}[/dim]")
+        table.add_row("工作区 Markdown", f"[bold cyan]./{self.workspace_sync_file.name}[/bold cyan] [dim](实时追加会话记录)[/dim]")
 
         self.console.print(table)
         self.console.print(
-            "[dim]💡 提示: 输入思路直接回车评测；输入 [bold yellow]/glow[/bold yellow] 可调用 Glow 交互分页；输入 [bold yellow]/help[/bold yellow] 查看所有指令。[/dim]"
+            "[dim]💡 提示: 输入思路直接回车评测；输入 [bold yellow]/glow[/bold yellow] 全屏分页；输入 [bold yellow]/hint[/bold yellow] 阶梯点拨；输入 [bold yellow]/help[/bold yellow] 查看所有指令。[/dim]"
         )
-        if self.glow_path:
-            self.console.print(
-                f"[dim]📺 实时分屏: 可在另一终端窗格执行 [bold cyan]glow-watch {self.sync_file}[/bold cyan] 实时同步题面与点拨！[/dim]\n"
-            )
-        else:
-            self.console.print()
+        self.console.print(
+            f"[dim]📄 实时文档: 已在当前目录生成 [bold cyan]./{self.workspace_sync_file.name}[/bold cyan] (VS Code 内按 [bold yellow]Ctrl+K V[/bold yellow] 即可开启右侧实时预览，原生渲染 TeX 与代码！)[/dim]\n"
+        )
 
     def load_candidates(self):
         with self.console.status("[bold green]正在从 Codeforces 题库筛选未解题目池...", spinner="dots"):
@@ -243,6 +280,8 @@ class CoachApp:
 
         self.current_problem = problem
         self.current_summary = summary
+        # 初始化工作区下的 PROBLEM.md
+        self.init_markdown_session()
         self.render_problem_view()
         return True
 
@@ -262,11 +301,13 @@ class CoachApp:
             expand=True
         ))
 
-        self.sync_markdown_file("形式化数学模型", self.current_summary)
         self.render_markdown_content(
             self.current_summary,
             title="★ 纯粹算法数学模型 (已剥离故事背景)",
             border_style="magenta"
+        )
+        self.console.print(
+            f"[dim]📄 实时文档: [bold cyan]./{self.workspace_sync_file.name}[/bold cyan] (可在编辑器按 [bold yellow]Ctrl+K V[/bold yellow] 开启右侧实时预览，原生渲染 TeX 与代码！)[/dim]"
         )
         self.console.print(
             "\n[dim]请在下方输入你的状态定义、贪心结论或复杂度；输入 [bold yellow]/glow[/bold yellow] 交互分页全屏浏览；输入 [bold yellow]/hint[/bold yellow] 阶梯点拨 或 [bold yellow]/code[/bold yellow] 查看代码。[/dim]\n"
@@ -328,8 +369,9 @@ class CoachApp:
                     hint = self.coach_chain.request_hint()
                 except Exception as e:
                     hint = f"请求点拨失败: {e}"
-            self.sync_markdown_file("教练点拨 (Hint)", hint)
+            self.append_markdown_message("💡 教练阶梯点拨 (Hint)", hint)
             self.render_markdown_content(hint, title="💡 教练点拨 (Hint)", border_style="yellow")
+            self.console.print(f"[dim]📝 点拨已实时追加至: [bold cyan]./{self.workspace_sync_file.name}[/bold cyan][/dim]\n")
 
         elif op == "/code":
             if not self.current_problem:
@@ -340,8 +382,9 @@ class CoachApp:
                     code_reply = self.coach_chain.generate_code()
                 except Exception as e:
                     code_reply = f"生成代码失败: {e}"
-            self.sync_markdown_file("参考 AC 代码", code_reply)
+            self.append_markdown_message("💻 现代 C++ 参考 AC 实现", code_reply)
             self.render_markdown_content(code_reply, title="💻 现代 C++ 参考 AC 实现", border_style="green")
+            self.console.print(f"[dim]📝 参考代码已实时追加至: [bold cyan]./{self.workspace_sync_file.name}[/bold cyan][/dim]\n")
 
         elif op == "/raw":
             if not self.current_problem:
@@ -357,8 +400,9 @@ class CoachApp:
                 content += f"#### Sample #{i}\nInput:\n```text\n{inp}\n```\nOutput:\n```text\n{outp}\n```\n\n"
             if p.note:
                 content += f"### Note\n{p.note}\n"
-            self.sync_markdown_file("原始题面内容", content)
+            self.append_markdown_message("📜 原始题面内容", content)
             self.render_markdown_content(content, title="原始题面内容", border_style="dim")
+            self.console.print(f"[dim]📝 原始题面已实时追加至: [bold cyan]./{self.workspace_sync_file.name}[/bold cyan][/dim]\n")
 
         elif op == "/pass":
             if not self.current_problem:
@@ -374,6 +418,7 @@ class CoachApp:
                 tags=",".join(p.tags),
                 notes="Manual /pass"
             )
+            self.append_markdown_message("✔ 手动标记通过 (/pass)", f"CF{p.contest_id}{p.index} 已手动标记为通过。")
             self.console.print(f"[bold green]✔ 已成功手动标记 CF{p.contest_id}{p.index} 为已解决（已解除当前锁定）！[/bold green]")
 
         elif op == "/stats":
@@ -408,7 +453,11 @@ class CoachApp:
         p = self.current_problem
         self.storage.save_chat_message(p.contest_id, p.index, "user", idea_text)
         self.storage.save_chat_message(p.contest_id, p.index, "coach", reply)
-        self.sync_markdown_file("思路验证反馈", reply)
+
+        # 实时同步至工作区 Markdown 会话
+        status_tag = "✔ ACCEPTED (思路验证通过)" if is_passed else "✖ 存在反例或逻辑漏洞"
+        self.append_markdown_message("👤 我的解题思路", idea_text)
+        self.append_markdown_message(f"🤖 教练评测反馈 ({status_tag})", reply)
 
         if is_passed:
             self.storage.clear_active_problem()
@@ -426,8 +475,9 @@ class CoachApp:
                 border_style="green"
             )
             self.console.print(
-                "[bold green]已记录到本地 AC 题单！[/bold green] 可输入 [bold yellow]/code[/bold yellow] 查看标准实现，或输入 [bold yellow]/next[/bold yellow] 挑战下一题。\n"
+                "[bold green]已记录到本地 AC 题单！[/bold green] 可输入 [bold yellow]/code[/bold yellow] 查看标准实现，或输入 [bold yellow]/next[/bold yellow] 挑战下一题。"
             )
+            self.console.print(f"[dim]📝 交互会话已实时追加至: [bold cyan]./{self.workspace_sync_file.name}[/bold cyan][/dim]\n")
         else:
             self.render_markdown_content(
                 reply,
@@ -435,8 +485,9 @@ class CoachApp:
                 border_style="red"
             )
             self.console.print(
-                "[dim]根据上方教练指出的单个反例或逻辑漏洞调整你的思路，再次输入；若卡住可输入 [bold yellow]/hint[/bold yellow] 获取进一步启发。[/dim]\n"
+                "[dim]根据上方教练指出的单个反例或逻辑漏洞调整你的思路，再次输入；若卡住可输入 [bold yellow]/hint[/bold yellow] 获取进一步启发。[/dim]"
             )
+            self.console.print(f"[dim]📝 交互会话已实时追加至: [bold cyan]./{self.workspace_sync_file.name}[/bold cyan][/dim]\n")
 
     def run(self):
         self.print_banner()

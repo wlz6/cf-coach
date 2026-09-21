@@ -4,5 +4,6 @@ __pycache__/
 data/
 config.yaml
 !config.example.yaml
+PROBLEM.md
 
 
